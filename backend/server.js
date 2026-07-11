@@ -1,0 +1,576 @@
+console.log("Backend starting...");
+
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const axios = require("axios");
+const crypto = require("crypto");
+const Razorpay = require("razorpay");
+require("dotenv").config();
+
+const razorpay = new Razorpay({
+  key_id:     process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
+const bcrypt = require("bcryptjs");
+const { calculateFinalOrderPrice } = require("./utils/pricingEngine");
+
+// Maps a full product name to its ML base category
+function getBaseCategory(name) {
+  if (name.includes("20mm") && name.includes("Online")) return "20mm Online";
+  if (name.includes("20mm")) return "20mm Inline";
+  if (name.includes("Online")) return "16mm Online";
+  return "16mm Inline";
+}
+
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+/* =========================
+   MongoDB Atlas Connection
+========================= */
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB Atlas Connected"))
+  .catch(err => console.log("Mongo Error:", err));
+
+/* =========================
+   Models
+========================= */
+const ApprovedPrice = require("./model/ApprovedPrice");
+const Stock         = require("./model/Stock");
+const Order         = require("./model/Order");
+const Cart          = require("./model/Cart");
+const User          = require("./model/User");
+
+/* =========================
+   Root Route
+========================= */
+app.get("/", (req, res) => {
+  res.send("Halchal Backend Running");
+});
+
+/* =========================
+   Auth — Register
+========================= */
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    if (!name || !email || !password)
+      return res.status(400).json({ error: "All fields are required." });
+    if (password.length < 6)
+      return res.status(400).json({ error: "Password must be at least 6 characters." });
+
+    const exists = await User.findOne({ email: email.toLowerCase().trim() });
+    if (exists)
+      return res.status(409).json({ error: "An account with this email already exists." });
+
+    const hashed = await bcrypt.hash(password, 10);
+    const user   = await User.create({ name: name.trim(), email: email.toLowerCase().trim(), password: hashed });
+
+    res.status(201).json({ message: "Account created successfully.", user: { id: user._id, name: user.name, email: user.email } });
+  } catch (err) {
+    console.error("Register error:", err.message);
+    res.status(500).json({ error: "Registration failed. Please try again." });
+  }
+});
+
+/* =========================
+   Auth — Login
+========================= */
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password)
+      return res.status(400).json({ error: "Email and password are required." });
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    if (!user)
+      return res.status(401).json({ error: "No account found with this email. Please create an account." });
+
+    const match = await bcrypt.compare(password, user.password);
+    if (!match)
+      return res.status(401).json({ error: "Incorrect password. Please try again." });
+
+    res.json({ message: "Login successful.", user: { id: user._id, name: user.name, email: user.email } });
+  } catch (err) {
+    console.error("Login error:", err.message);
+    res.status(500).json({ error: "Login failed. Please try again." });
+  }
+});
+
+/* =========================
+   AI Pricing Route
+========================= */
+// Zone ID → representative state (for ML model)
+const ZONE_STATE_MAP = {
+  "Z1": "Maharashtra",
+  "Z2": "Gujarat",
+  "Z3": "Karnataka",
+  "Z4": "Rajasthan",
+  "Z5": "Bihar",
+};
+
+app.post("/api/ai-price", async (req, res) => {
+  try {
+    const { pipe_type, quantity, state, zone, zone_id, month, year, govt_subsidy } = req.body;
+    const orderQuantity = Number(quantity) || 1;
+
+    // Resolve state from zone_id or zone string (admin sends zone: "Z1")
+    const zoneKey     = zone_id || zone;
+    const resolvedState = state || ZONE_STATE_MAP[zoneKey] || "Maharashtra";
+
+    // Dynamic prev_month_sales from real order history (last 30 days)
+    const category      = getBaseCategory(pipe_type);
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const minId = new mongoose.Types.ObjectId(
+      Math.floor(thirtyDaysAgo.getTime() / 1000).toString(16).padStart(8, "0") +
+      "0000000000000000"
+    );
+    let prevMonthSales = 450;
+    try {
+      const salesAgg = await Order.aggregate([
+        { $match: { _id: { $gte: minId }, pipe_type: { $regex: category, $options: "i" } } },
+        { $group: { _id: null, total: { $sum: "$quantity" } } }
+      ]).maxTimeMS(5000);
+      prevMonthSales = salesAgg[0]?.total ?? 450;
+    } catch (dbErr) {
+      console.warn("DB aggregate skipped, using default:", dbErr.message);
+    }
+
+    const ML_API_URL = process.env.ML_API_URL || "http://localhost:5001";
+    const mlResponse = await axios.post(`${ML_API_URL}/calculate-price`, {
+      pipeType:         pipe_type,
+      state:            resolvedState,
+      zone_id:          zoneKey || "Z1",
+      month:            month || new Date().getMonth() + 1,
+      year:             year  || new Date().getFullYear(),
+      prev_month_sales: prevMonthSales,
+      govt_subsidy:     govt_subsidy !== undefined ? govt_subsidy : 1,
+    }, { timeout: 90000 });
+
+    const mlData  = mlResponse.data;
+    const aiPrice = mlData.final_price;
+
+    if (!aiPrice) {
+      return res.status(400).json({ error: "Invalid AI price response" });
+    }
+
+    const pricingResult = calculateFinalOrderPrice({
+      approvedPrice: aiPrice,
+      quantity: orderQuantity
+    });
+
+    res.json({
+      ...pricingResult,
+      predicted_demand:  mlData.predicted_demand,
+      season:            mlData.season,
+      base_price:        mlData.base_price,
+      ex_factory_price:  mlData.final_price,
+      factors:           mlData.factors,
+      pipe_type:         mlData.pipe_type,
+      state:             resolvedState,
+      zone:              mlData.zone_id,
+    });
+
+  } catch (error) {
+    console.error("AI Pricing Error:", error.message, error.code);
+    res.status(500).json({ error: "AI pricing failed", detail: error.message });
+  }
+});
+
+/* =========================
+   Cart — Sync (upsert)
+========================= */
+app.post("/api/cart/sync", async (req, res) => {
+  try {
+    const { sessionId, items } = req.body;
+    if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+
+    const cart = await Cart.findOneAndUpdate(
+      { sessionId },
+      { items: items || [], updatedAt: new Date() },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    res.json({ ok: true, itemCount: cart.items.length });
+  } catch (error) {
+    console.error("Cart Sync Error:", error.message);
+    res.status(500).json({ error: "Cart sync failed" });
+  }
+});
+
+/* =========================
+   Cart — Load
+========================= */
+app.get("/api/cart/:sessionId", async (req, res) => {
+  try {
+    const cart = await Cart.findOne({ sessionId: req.params.sessionId });
+    res.json({ items: cart?.items || [], updatedAt: cart?.updatedAt || null });
+  } catch (error) {
+    console.error("Cart Load Error:", error.message);
+    res.status(500).json({ error: "Cart load failed" });
+  }
+});
+
+/* =========================
+   Cart — Clear
+========================= */
+app.delete("/api/cart/:sessionId", async (req, res) => {
+  try {
+    await Cart.findOneAndUpdate(
+      { sessionId: req.params.sessionId },
+      { items: [] }
+    );
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("Cart Clear Error:", error.message);
+    res.status(500).json({ error: "Cart clear failed" });
+  }
+});
+
+/* =========================
+   Approve Price (Admin)
+========================= */
+app.post("/api/approve-price", async (req, res) => {
+  try {
+    const { pipe_type, region, approved_price } = req.body;
+
+    const updated = await ApprovedPrice.findOneAndUpdate(
+      { pipe_type, region },
+      { price: approved_price, approved_at: new Date() },
+      { returnDocument: "after", upsert: true }
+    );
+
+    res.json({ message: "Price approved successfully", data: updated });
+  } catch (error) {
+    console.error("Approval Error:", error);
+    res.status(500).json({ error: "Approval failed" });
+  }
+});
+
+/* =========================
+   Get Approved Prices (all)
+========================= */
+app.get("/api/approved-prices", async (req, res) => {
+  try {
+    const prices = await ApprovedPrice.find().sort({ approved_at: -1 });
+    res.json(prices);
+  } catch (error) {
+    console.error("Fetch Approved Error:", error);
+    res.status(500).json({ error: "Failed to fetch approved prices" });
+  }
+});
+
+/* =========================
+   Check Approved Price — current month
+   Query: ?pipe_type=16mm+Inline&zone=Z1
+========================= */
+app.get("/api/approved-prices/current", async (req, res) => {
+  try {
+    const { pipe_type, zone } = req.query;
+    if (!pipe_type || !zone) return res.json({ approved: false });
+
+    const now           = new Date();
+    const startOfMonth  = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const record = await ApprovedPrice.findOne({
+      pipe_type,
+      region: zone,
+      approved_at: { $gte: startOfMonth },
+    }).sort({ approved_at: -1 });
+
+    if (record) res.json({ approved: true, price: record.price, approved_at: record.approved_at });
+    else        res.json({ approved: false });
+  } catch (err) {
+    console.error("Approved price check error:", err.message);
+    res.json({ approved: false });
+  }
+});
+
+/* =========================
+   Get All Stock
+========================= */
+app.get("/api/stock", async (req, res) => {
+  try {
+    const stock = await Stock.find();
+    res.json(stock);
+  } catch (error) {
+    console.error("Stock Fetch Error:", error);
+    res.status(500).json({ error: "Failed to fetch stock" });
+  }
+});
+
+/* =========================
+   Update Stock
+========================= */
+app.post("/api/stock/update", async (req, res) => {
+  try {
+    const { pipe_type, quantity } = req.body;
+
+    const updatedStock = await Stock.findOneAndUpdate(
+      { pipe_type },
+      { quantity, updated_at: new Date() },
+      { returnDocument: "after", upsert: true }
+    );
+
+    res.json(updatedStock);
+  } catch (error) {
+    console.error("Stock Update Error:", error);
+    res.status(500).json({ error: "Stock update failed" });
+  }
+});
+
+/* =========================
+   Seed Stock (run once)
+========================= */
+app.post("/api/stock/seed", async (req, res) => {
+  const PRODUCTS = [
+    { pipe_type: "Premium 16mm Inline",  quantity: 500 },
+    { pipe_type: "Gold 16mm Inline",     quantity: 500 },
+    { pipe_type: "Supreme 16mm Online",  quantity: 300 },
+    { pipe_type: "Premium 20mm Inline",  quantity: 500 },
+    { pipe_type: "Shakti 20mm Inline",   quantity: 400 },
+    { pipe_type: "Supreme 20mm Online",  quantity: 300 },
+  ];
+  try {
+    const results = await Promise.all(
+      PRODUCTS.map(p =>
+        Stock.findOneAndUpdate(
+          { pipe_type: p.pipe_type },
+          { quantity: p.quantity, updated_at: new Date() },
+          { upsert: true, returnDocument: "after", new: true }
+        )
+      )
+    );
+    res.json({ message: "Stock seeded successfully", data: results });
+  } catch (error) {
+    res.status(500).json({ error: "Seed failed", detail: error.message });
+  }
+});
+
+/* =========================
+   Create Order
+   Accepts full pricing snapshot from cart
+========================= */
+app.post("/api/orders", async (req, res) => {
+  try {
+    const {
+      pipe_type, quantity, region, session_id,
+      // Pricing snapshot (sent from cart)
+      approved_price, final_price, discount_percent,
+      total_ex_gst, total_gst, total_with_gst,
+      season, zone, predicted_demand,
+      // Customer + delivery details captured at checkout
+      customer_name, customer_email,
+      delivery_address, phone, pincode,
+      payment_method,
+    } = req.body;
+
+    if (!delivery_address || !phone || !pincode) {
+      return res.status(400).json({ error: "Delivery address, phone, and pincode are required." });
+    }
+
+    let status = "Shipped";
+    let requiresApproval = false;
+
+    if (quantity > 100) {
+      status = "Pending Approval";
+      requiresApproval = true;
+    } else {
+      const stockItem = await Stock.findOneAndUpdate(
+        { pipe_type, quantity: { $gte: quantity } },
+        { $inc: { quantity: -quantity }, $set: { updated_at: new Date() } },
+        { new: true }
+      );
+
+      if (!stockItem) {
+        const exists = await Stock.findOne({ pipe_type });
+        if (exists) {
+          return res.status(400).json({ error: `Insufficient stock. Available: ${exists.quantity} coil(s).` });
+        }
+        status = "Pending Approval";
+        requiresApproval = true;
+      }
+    }
+
+    const newOrder = new Order({
+      pipe_type,
+      quantity,
+      region,
+      status,
+      requires_approval: requiresApproval,
+      // Persist pricing snapshot to Atlas
+      approved_price,
+      final_price,
+      discount_percent,
+      total_ex_gst,
+      total_gst,
+      total_with_gst,
+      gst_rate: 12,
+      season,
+      zone,
+      predicted_demand,
+      session_id,
+      customer_name,
+      customer_email,
+      delivery_address,
+      phone,
+      pincode,
+      // Razorpay is in test mode — no real money moves either way, so every
+      // order starts Pending regardless of payment method until fulfilled manually.
+      payment_method: payment_method === "Online" ? "Online" : "Cash",
+      payment_status: "Pending",
+    });
+
+    await newOrder.save();
+
+    res.json({
+      message: status === "Pending Approval"
+        ? "Order received — pending admin approval."
+        : "Order placed successfully!",
+      order: newOrder
+    });
+
+  } catch (error) {
+    console.error("Order Error:", error);
+    res.status(500).json({ error: "Order creation failed" });
+  }
+});
+
+/* =========================
+   Get All Orders (Admin)
+========================= */
+app.get("/api/orders", async (req, res) => {
+  try {
+    const orders = await Order.find().sort({ created_at: -1 }).limit(200);
+    res.json(orders);
+  } catch (error) {
+    console.error("Orders Fetch Error:", error);
+    res.status(500).json({ error: "Failed to fetch orders" });
+  }
+});
+
+/* =========================
+   Approve Order (Admin)
+========================= */
+app.post("/api/orders/approve/:id", async (req, res) => {
+  try {
+    const order = await Order.findByIdAndUpdate(
+      req.params.id,
+      { status: "Approved", requires_approval: false },
+      { new: true }
+    );
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    res.json({ message: "Order approved successfully", order });
+  } catch (error) {
+    console.error("Order Approve Error:", error);
+    res.status(500).json({ error: "Order approval failed" });
+  }
+});
+
+/* =========================
+   Razorpay — Create Order
+========================= */
+app.post("/api/payment/create-order", async (req, res) => {
+  try {
+    const { amount } = req.body; // amount in rupees
+    const order = await razorpay.orders.create({
+      amount:   Math.round(amount * 100), // paise
+      currency: "INR",
+      receipt:  `rcpt_${Date.now()}`,
+    });
+    res.json(order);
+  } catch (error) {
+    console.error("Razorpay create-order error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/* =========================
+   Razorpay — Verify & Save
+========================= */
+app.post("/api/payment/verify", async (req, res) => {
+  try {
+    const {
+      razorpay_order_id, razorpay_payment_id, razorpay_signature, items, session_id,
+      customer_name, customer_email, delivery_address, phone, pincode,
+    } = req.body;
+
+    if (!delivery_address || !phone || !pincode) {
+      return res.status(400).json({ error: "Delivery address, phone, and pincode are required." });
+    }
+
+    // Verify HMAC signature
+    const expected = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest("hex");
+
+    if (expected !== razorpay_signature) {
+      return res.status(400).json({ error: "Payment verification failed" });
+    }
+
+    // Save each cart item as an order
+    for (const item of items) {
+      const quantity = item.quantity;
+      let status = "Shipped";
+      let requiresApproval = false;
+
+      if (quantity > 100) {
+        status = "Pending Approval";
+        requiresApproval = true;
+      } else {
+        const stockItem = await Stock.findOneAndUpdate(
+          { pipe_type: item.name, quantity: { $gte: quantity } },
+          { $inc: { quantity: -quantity }, $set: { updated_at: new Date() } },
+          { new: true }
+        ).catch(() => null);
+        if (!stockItem) { status = "Pending Approval"; requiresApproval = true; }
+      }
+
+      await new Order({
+        pipe_type:        item.name,
+        quantity,
+        region:           item.state,
+        status,
+        requires_approval: requiresApproval,
+        approved_price:   item.approvedPrice,
+        final_price:      item.finalPrice,
+        discount_percent: item.discountPercent,
+        total_ex_gst:     item.totalExGST,
+        total_gst:        item.totalGST,
+        total_with_gst:   item.totalWithGST,
+        gst_rate:         12,
+        season:           item.season,
+        zone:             item.zone,
+        predicted_demand: item.predicted_demand,
+        session_id,
+        payment_id:       razorpay_payment_id,
+        razorpay_order_id,
+        customer_name,
+        customer_email,
+        delivery_address,
+        phone,
+        pincode,
+        // Razorpay is in test mode — no real money moves, so stays Pending
+        // like the Cash flow until fulfilled manually.
+        payment_method:   "Online",
+        payment_status:   "Pending",
+      }).save().catch(console.error);
+    }
+
+    res.json({ success: true, payment_id: razorpay_payment_id });
+  } catch (error) {
+    console.error("Razorpay verify error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/* =========================
+   Start Server
+========================= */
+app.listen(5000, () => {
+  console.log("Server running on port 5000");
+});
