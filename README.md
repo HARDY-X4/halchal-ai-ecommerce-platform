@@ -1,37 +1,34 @@
 # 🌾 Halchal AI E-Commerce Platform
 
-An AI-powered e-commerce platform developed as a Final Year B.E. (Artificial Intelligence & Data Science) project. The platform is designed to connect farmers and buyers through an intelligent online marketplace while providing AI-driven features for pricing, crop management, inventory tracking, and order management.
+An industry-sponsored AI-powered e-commerce platform developed as a Final Year B.E. (Artificial Intelligence & Data Science) project. The platform aims to connect farmers and buyers through a digital marketplace while leveraging Artificial Intelligence for smart pricing, inventory management, and agricultural product management.
 
 ---
 
 ## 📌 Project Overview
 
-Halchal AI E-Commerce Platform is a full-stack web application that enables farmers to sell agricultural products directly to customers. The platform incorporates Artificial Intelligence to assist with pricing decisions and provides separate dashboards for administrators, farmers, and customers.
+Halchal AI E-Commerce Platform is a full-stack web application designed to streamline agricultural commerce by enabling farmers to sell products directly to customers. The platform includes role-based access for administrators, farmers, and customers, along with AI-powered features to support pricing decisions and business operations.
 
 ---
 
-## 🚀 Features
+## 🚀 Key Features
 
 ### 👨‍🌾 Farmer Module
 - Farmer Registration & Login
-- Product Management
-- Inventory Management
-- Stock Tracking
-- Order Management
+- Product Listing & Management
+- Inventory & Stock Management
+- Order Processing
 - Delivery Status Updates
 
 ### 👤 Customer Module
-- User Registration & Login
-- Browse Products
-- Product Search & Filters
+- User Registration & Authentication
+- Browse & Search Products
 - Shopping Cart
 - Secure Checkout
 - Order Tracking
 
 ### 👨‍💼 Admin Module
-- Dashboard
-- User Management
-- Farmer Approval
+- Admin Dashboard
+- User & Farmer Management
 - Product Approval
 - Inventory Monitoring
 - Order Management
@@ -39,13 +36,13 @@ Halchal AI E-Commerce Platform is a full-stack web application that enables farm
 
 ### 🤖 AI Features
 - AI-assisted Product Pricing
-- Smart Price Recommendation
+- Smart Price Recommendations
 - Market Trend Analysis
 - Dynamic Pricing Support
 
 ---
 
-## 🛠️ Tech Stack
+## 🛠️ Technology Stack
 
 ### Frontend
 - React.js
@@ -62,114 +59,77 @@ Halchal AI E-Commerce Platform is a full-stack web application that enables farm
 - MongoDB
 
 ### Authentication
-- JWT Authentication
+- JSON Web Token (JWT)
 
-### Other Tools
-- Git
-- GitHub
-- REST APIs
+### Version Control
+- Git & GitHub
 
 ---
 
 ## 📂 Project Structure
 
 ```
-Halchal-AI-Ecommerce-Platform
-│
-├── backend/
-├── frontend/
-├── docs/
-├── package.json
-├── package-lock.json
-└── README.md
+backend/
+frontend/
+docs/
+package.json
+README.md
 ```
 
 ---
 
 ## ⚙️ Installation
 
-### Clone Repository
-
 ```bash
 git clone https://github.com/HARDY-X4/halchal-ai-ecommerce-platform.git
-```
+cd halchal-ai-ecommerce-platform
 
-### Install Dependencies
-
-```bash
 npm install
 ```
 
-### Frontend
-
-```bash
-cd frontend
-npm install
-npm start
-```
-
-### Backend
-
-```bash
-cd backend
-npm install
-npm run dev
-```
+Start the frontend and backend according to the project configuration.
 
 ---
 
-## 📷 Screenshots
+## 📷 Project Screenshots
 
-> Add screenshots inside the `docs/images` folder.
-
-Example:
-
-- Home Page
-- Login Page
-- Farmer Dashboard
-- Customer Dashboard
-- Admin Dashboard
-- Product Listing
-- Cart
-- Checkout
-- AI Pricing Module
+> Add screenshots of the Home Page, Admin Dashboard, Farmer Dashboard, Customer Dashboard, Product Listing, and AI Pricing Module.
 
 ---
 
-## 📈 Future Enhancements
+## 🚀 Future Enhancements
 
-- AI Demand Forecasting
+- AI-based Demand Forecasting
 - Product Recommendation System
-- Voice-based Search
-- Payment Gateway Integration
+- Online Payment Gateway Integration
 - Mobile Application
 - Multi-language Support
 - Real-time Analytics Dashboard
 
 ---
 
-## 👨‍💻 Team Project
+## 👨‍💻 Project Information
 
-This project was developed collaboratively as part of the Final Year B.E. Artificial Intelligence & Data Science curriculum.
+**Project Type:** Industry-Sponsored Final Year Project
+
+This project was developed collaboratively as part of the Bachelor of Engineering (Artificial Intelligence & Data Science) curriculum in partnership with the project sponsor.
 
 ### My Contributions
-
 - Frontend development
 - Backend feature implementation
-- API integration
+- REST API integration
 - UI improvements
-- Bug fixing and testing
-- GitHub repository management
-- Documentation
+- Testing and debugging
+- Documentation and GitHub management
 
 ---
 
-## 📄 License
+## 📜 Disclaimer
 
-This project is developed for educational purposes.
+This repository is intended for academic and portfolio purposes. The project was developed collaboratively as an industry-sponsored final-year project.
 
 ---
 
-## ⭐ Support
+## ⭐ Acknowledgements
 
-If you found this project useful, consider giving it a ⭐ on GitHub.
+Special thanks to the project sponsor, faculty mentors, and team members for their guidance and support throughout the development of this project.
